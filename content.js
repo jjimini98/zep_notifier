@@ -1,213 +1,162 @@
-// content.js (final integrated)
-// Features:
-// - Auto-detects & stores your nickname from "Create Your Profile" modal (Nickname input)
-// - Ignores chat history on initial load (warm-up) so only messages after you join trigger notifications
-// - Only notifies when "Private" tab is ON (v1 policy)
-// - Excludes your own messages using detected nickname
-// - Dedupe (WeakSet + signature LRU) + cooldown + safe sendMessage
+// ======================================================
+// ZEP Private Chat Notifier - FINAL STABLE VERSION
+// ======================================================
 
-// ======================================================
-// 0) My name (auto) from profile modal
-// ======================================================
+// ------------------------------------------------------
+// 0. Utils
+// ------------------------------------------------------
+function normalizeName(name) {
+  return (name ?? "")
+    .toString()
+    .normalize("NFKC")
+    .replace(/\u200b/g, "")
+    .replace(/\s/g, "")
+    .trim();
+}
+
+// ------------------------------------------------------
+// 1. My Name (auto detect from profile modal)
+// ------------------------------------------------------
 let MY_NAME = null;
 
 async function loadMyName() {
   const res = await chrome.storage.local.get({ myNameAuto: null });
-  MY_NAME = res.myNameAuto;
-  return MY_NAME;
+  MY_NAME = res.myNameAuto ? normalizeName(res.myNameAuto) : null;
 }
 
 async function saveMyName(name) {
-  const n = (name ?? "").toString().trim();
+  const n = normalizeName(name);
   if (!n) return;
   if (MY_NAME === n) return;
+
   MY_NAME = n;
   await chrome.storage.local.set({ myNameAuto: n });
-  console.log("[ZEP Notifier] saved my name:", n);
-}
 
-// Label-text based input finder (minimize hardcoding)
-function findInputByLabelText(root, labelText) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-
-  const labelEl = nodes.find((el) => {
-    const t = (el.textContent || "").trim();
-    return t === labelText || t.includes(labelText);
-  });
-  if (!labelEl) return null;
-
-  // 1) nearby input
-  let input =
-    labelEl.querySelector?.("input") ||
-    labelEl.parentElement?.querySelector?.("input") ||
-    labelEl.closest?.("div")?.querySelector?.("input");
-
-  if (input) return input;
-
-  // 2) siblings after label
-  let cur = labelEl;
-  for (let i = 0; i < 10; i++) {
-    cur = cur.nextElementSibling;
-    if (!cur) break;
-    const cand = cur.querySelector?.("input") || (cur.tagName === "INPUT" ? cur : null);
-    if (cand) return cand;
-  }
-
-  return null;
+  console.log("[ZEP] My name saved:", n);
 }
 
 function bootProfileNameHook() {
-  loadMyName(); // preload existing if any
+  loadMyName();
 
   let hooked = false;
 
   const tryHook = () => {
     if (hooked) return;
 
-    // Find modal/container by headline text
-    const modalRoot =
-      Array.from(document.querySelectorAll("div, section, main"))
-        .find((el) => (el.textContent || "").includes("Create Your Profile")) || null;
+    // ✅ 1차: placeholder 기반 (가장 안정적)
+    let input =
+      document.querySelector('input[placeholder="Enter your nickname"]');
 
-    if (!modalRoot) return;
+    // ✅ 2차 fallback (UI 변경 대비)
+    if (!input) {
+      input = document.querySelector(
+        'input[data-sentry-element="Input"]'
+      );
+    }
 
-    const nicknameInput =
-      findInputByLabelText(modalRoot, "Nickname") ||
-      findInputByLabelText(modalRoot, "닉네임");
+    if (!input) return;
 
-    if (!nicknameInput) return;
+    const commit = () => saveMyName(input.value);
 
-    const commit = () => saveMyName(nicknameInput.value);
-
-    nicknameInput.addEventListener("input", commit, { passive: true });
-    nicknameInput.addEventListener("change", commit, { passive: true });
-    nicknameInput.addEventListener("keydown", (e) => {
+    input.addEventListener("input", commit);
+    input.addEventListener("change", commit);
+    input.addEventListener("keydown", e => {
       if (e.key === "Enter") commit();
     });
 
-    const enterBtn =
-      Array.from(modalRoot.querySelectorAll("button"))
-        .find((b) => ((b.textContent || "").trim().toLowerCase() === "enter"));
+    // Enter 버튼 클릭
+    const enterBtn = [...document.querySelectorAll("button")]
+      .find(b => (b.textContent || "").trim().toLowerCase() === "enter");
 
-    if (enterBtn) enterBtn.addEventListener("click", commit, { passive: true });
+    if (enterBtn) {
+      enterBtn.addEventListener("click", commit);
+    }
 
     hooked = true;
-    console.log("[ZEP Notifier] hooked Nickname input");
+    console.log("[ZEP] Nickname hook attached ✅");
   };
 
-  // 1) try immediately
   tryHook();
 
-  // 2) keep trying until hooked (modal may appear later)
   const obs = new MutationObserver(() => {
     if (!hooked) tryHook();
   });
-  obs.observe(document.documentElement, { childList: true, subtree: true });
+
+  obs.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
 }
 
 bootProfileNameHook();
 
-// ======================================================
-// 1) Settings (notification policy, cooldown, debug)
-// ======================================================
-const DEFAULTS = {
-  onlyWhenPrivateOn: true, // v1 policy
-  cooldownMs: 1500,        // prevent notification spam
-  debug: false             // optional logs
+// ------------------------------------------------------
+// 2. Settings
+// ------------------------------------------------------
+const SETTINGS = {
+  cooldownMs: 1500,
+  onlyWhenPrivateOn: true
 };
 
-let SETTINGS = { ...DEFAULTS };
-
-function log(...args) {
-  if (SETTINGS.debug) console.log("[ZEP Notifier]", ...args);
-}
-
-function loadSettings() {
-  chrome.storage.sync.get(DEFAULTS, (res) => {
-    SETTINGS = { ...DEFAULTS, ...res };
-    log("settings loaded", SETTINGS);
-  });
-}
-
-loadSettings();
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "sync") return;
-  let changed = false;
-  for (const k of Object.keys(DEFAULTS)) {
-    if (changes[k]) {
-      SETTINGS[k] = changes[k].newValue;
-      changed = true;
-    }
-  }
-  if (changed) log("settings updated", SETTINGS);
-});
-
-// ======================================================
-// 2) DOM Selectors
-// ======================================================
+// ------------------------------------------------------
+// 3. Selectors
+// ------------------------------------------------------
 const BUBBLE_SELECTOR = '[data-sentry-element="BubbleWrapper"]';
 const SENDER_SELECTOR = '[data-sentry-component="SenderName"]';
 const CONTENT_SELECTOR = '[data-sentry-element="MessageContent"]';
 
-// Private tab ON check
+// ------------------------------------------------------
+// 4. Private tab check
+// ------------------------------------------------------
 function isPrivateTabOn() {
-  const on = document.querySelector(
+  const el = document.querySelector(
     'button[role="radio"][data-state="on"] span[data-sentry-component="ChatTabItemContent"]'
   );
-  return (on?.textContent || "").trim() === "Private";
+  return (el?.textContent || "").trim() === "Private";
 }
 
-// ======================================================
-// 3) Ignore history on initial load (Warm-up)
-// ======================================================
-// Why: On login, ZEP often renders past chat history as "new DOM nodes".
-// We want notifications only from the moment you joined (after warm-up).
+// ------------------------------------------------------
+// 5. Warm-up (ignore history messages)
+// ------------------------------------------------------
 let NOTIFY_READY = false;
-const WARMUP_MS = 2500; // adjust if needed (slow network: 4000)
 
 setTimeout(() => {
   NOTIFY_READY = true;
-  console.log("[ZEP Notifier] notify ready ✅");
-}, WARMUP_MS);
+  console.log("[ZEP] Notification ready");
+}, 2500);
 
-// ======================================================
-// 4) Dedupe + Cooldown
-// ======================================================
+// ------------------------------------------------------
+// 6. Dedup + cooldown
+// ------------------------------------------------------
 const seenNodes = new WeakSet();
-let lastNotifyAt = 0;
-
-// signature LRU
 const recentSigs = new Set();
-const MAX_SIGS = 200;
+let lastNotify = 0;
+
+function canNotify() {
+  const now = Date.now();
+  if (now - lastNotify < SETTINGS.cooldownMs) return false;
+  lastNotify = now;
+  return true;
+}
 
 function addSig(sig) {
   recentSigs.add(sig);
-  if (recentSigs.size > MAX_SIGS) {
+  if (recentSigs.size > 200) {
     const first = recentSigs.values().next().value;
     recentSigs.delete(first);
   }
 }
 
-function canNotifyNow() {
-  const cd = Number(SETTINGS.cooldownMs) || 0;
-  if (cd <= 0) return true;
-  const now = Date.now();
-  if (now - lastNotifyAt >= cd) {
-    lastNotifyAt = now;
-    return true;
-  }
-  return false;
-}
+// ------------------------------------------------------
+// 7. Extract message
+// ------------------------------------------------------
+function extractMessage(bubble) {
+  const senderRaw =
+    bubble.querySelector(SENDER_SELECTOR)?.innerText ?? "";
 
-// ======================================================
-// 5) Extract message from bubble
-// ======================================================
-function extractMessage(bubbleEl) {
-  const sender = bubbleEl.querySelector(SENDER_SELECTOR)?.innerText?.trim() || "";
-  const contentEl = bubbleEl.querySelector(CONTENT_SELECTOR);
+  const sender = normalizeName(senderRaw);
+
+  const contentEl = bubble.querySelector(CONTENT_SELECTOR);
 
   const body =
     contentEl?.querySelector("p")?.innerText?.trim() ||
@@ -215,90 +164,84 @@ function extractMessage(bubbleEl) {
     "";
 
   if (!sender || !body) return null;
+
   return { sender, body };
 }
 
-// ======================================================
-// 6) Notify background safely
-// ======================================================
-function notifyBackground(title, body) {
-  const safeTitle = (title ?? "").toString().trim() || "ZEP";
-  const safeBody = (body ?? "").toString().trim() || "새 메시지가 도착했어요";
-
+// ------------------------------------------------------
+// 8. Send notification
+// ------------------------------------------------------
+function notify(title, body) {
   try {
     chrome.runtime.sendMessage({
       type: "ZEP_NOTIFY",
-      payload: { title: safeTitle, body: safeBody }
+      payload: {
+        title: title || "ZEP",
+        body: body || "새 메시지"
+      }
     });
   } catch (e) {
-    // common during extension reload: "Extension context invalidated"
-    console.warn("[ZEP Notifier] sendMessage failed:", e);
+    console.warn("[ZEP] sendMessage failed", e);
   }
 }
 
-// ======================================================
-// 7) Main handler
-// ======================================================
-function handleBubble(bubbleEl) {
-  if (!(bubbleEl instanceof HTMLElement)) return;
-  if (seenNodes.has(bubbleEl)) return;
+// ------------------------------------------------------
+// 9. Main handler
+// ------------------------------------------------------
+function handleBubble(bubble) {
+  if (!(bubble instanceof HTMLElement)) return;
+  if (seenNodes.has(bubble)) return;
 
-  // v1 policy: Private tab only
   if (SETTINGS.onlyWhenPrivateOn && !isPrivateTabOn()) return;
 
-  const msg = extractMessage(bubbleEl);
+  const msg = extractMessage(bubble);
   if (!msg) return;
 
-  // Warm-up: treat as history loading (do not notify)
+  // 로그인 직후 기록 무시
   if (!NOTIFY_READY) {
-    seenNodes.add(bubbleEl);
+    seenNodes.add(bubble);
     return;
   }
 
-  // Exclude my own messages
+  // ✅ 내 메시지 제외 (핵심)
   if (MY_NAME && msg.sender === MY_NAME) {
-    seenNodes.add(bubbleEl);
+    seenNodes.add(bubble);
     return;
   }
 
-  // Dedupe by signature
-  const sig = `${msg.sender}::${msg.body}`;
+  const sig = msg.sender + "::" + msg.body;
+
   if (recentSigs.has(sig)) {
-    seenNodes.add(bubbleEl);
+    seenNodes.add(bubble);
     return;
   }
 
-  // Cooldown
-  if (!canNotifyNow()) {
-    seenNodes.add(bubbleEl);
+  if (!canNotify()) {
+    seenNodes.add(bubble);
     return;
   }
 
-  // Mark seen
-  seenNodes.add(bubbleEl);
+  seenNodes.add(bubble);
   addSig(sig);
 
-  // ✅ Title: sender / Body: message
-  notifyBackground(msg.sender, msg.body);
+  notify(msg.sender, msg.body);
 }
 
-// ======================================================
-// 8) Prime existing bubbles (avoid notifying already-rendered nodes)
-// ======================================================
-function primeExistingBubbles() {
-  const bubbles = document.querySelectorAll(BUBBLE_SELECTOR);
-  bubbles.forEach((b) => seenNodes.add(b));
-  console.log(`[ZEP Notifier] primed existing bubbles: ${bubbles.length}`);
+// ------------------------------------------------------
+// 10. Prime existing bubbles
+// ------------------------------------------------------
+function primeExisting() {
+  document.querySelectorAll(BUBBLE_SELECTOR)
+    .forEach(el => seenNodes.add(el));
 }
 
-// ======================================================
-// 9) Observe DOM mutations
-// ======================================================
+// ------------------------------------------------------
+// 11. Observer
+// ------------------------------------------------------
 function bootObserver() {
-  const root = document.body;
-  if (!root) return;
+  primeExisting();
 
-  const observer = new MutationObserver((mutations) => {
+  const observer = new MutationObserver(mutations => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -308,17 +251,18 @@ function bootObserver() {
           continue;
         }
 
-        const bubbles = node.querySelectorAll?.(BUBBLE_SELECTOR);
-        if (bubbles?.length) bubbles.forEach(handleBubble);
+        node.querySelectorAll?.(BUBBLE_SELECTOR)
+          .forEach(handleBubble);
       }
     }
   });
 
-  // Prime what already exists before we start listening
-  primeExistingBubbles();
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
 
-  observer.observe(root, { childList: true, subtree: true });
-  console.log("[ZEP Notifier] observer running");
+  console.log("[ZEP] Observer running");
 }
 
 bootObserver();
