@@ -58,6 +58,9 @@ function bootProfileNameHook() {
 
     const commit = () => saveMyName(input.value);
 
+    // ✅ 자동완성/미리채워진 닉네임도 즉시 캡처
+    if (input.value) commit();
+
     input.addEventListener("input", commit);
     input.addEventListener("change", commit);
     input.addEventListener("keydown", e => {
@@ -192,7 +195,7 @@ function handleBubble(bubble) {
   if (!(bubble instanceof HTMLElement)) return;
   if (seenNodes.has(bubble)) return;
 
-  if (SETTINGS.onlyWhenPrivateOn && !isPrivateTabOn()) return;
+  if (!document.hidden && SETTINGS.onlyWhenPrivateOn && !isPrivateTabOn()) return;
 
   const msg = extractMessage(bubble);
   if (!msg) return;
