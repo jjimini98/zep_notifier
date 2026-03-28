@@ -195,6 +195,7 @@ function handleBubble(bubble) {
   if (!(bubble instanceof HTMLElement)) return;
   if (seenNodes.has(bubble)) return;
 
+  // ✅ 다른 탭으로 이동 시(document.hidden)에는 Private 탭 체크 건너뜀 → 항상 알림 발생
   if (!document.hidden && SETTINGS.onlyWhenPrivateOn && !isPrivateTabOn()) return;
 
   const msg = extractMessage(bubble);
