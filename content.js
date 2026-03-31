@@ -204,7 +204,7 @@ function handleBubble(bubble) {
   }
 
   // ✅ 내 메시지 제외 (핵심)
-  if (MY_NAME && msg.sender === MY_NAME) {
+  if (MY_NAME && msg.sender.includes(MY_NAME)) {
     seenNodes.add(bubble);
     return;
   }
