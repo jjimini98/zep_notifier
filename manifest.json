@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "ZEP Private Chat Notifier",
+  "version": "1.0.2",
+  "description": "Receive instant OS notifications when new messages arrive in ZEP Private Chat.",
+  "permissions": ["notifications", "storage"],
+  "host_permissions": ["https://zep.us/*","https://www.zep.us/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://zep.us/*","https://www.zep.us/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ZEP Notifier"
+  },
+  "icons": {
+    "16": "icon128.png",
+    "48": "icon128.png",
+    "128": "icon128.png"
+  }
+}
